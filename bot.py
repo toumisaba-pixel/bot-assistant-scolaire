@@ -1,5 +1,6 @@
 import os
 import logging
+import asyncio
 from flask import Flask
 from threading import Thread
 from telegram import Update
@@ -11,7 +12,7 @@ logging.basicConfig(
     level=logging.INFO
 )
 
-# --- Serveur Web Flask pour garder le bot éveillé ---
+# --- Serveur Web Flask ---
 app = Flask(__name__)
 
 @app.route('/')
@@ -45,7 +46,6 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
-    # Réponse automatique d'accueil aux questions
     response = (
         f"J'ai bien reçu votre question : *\"{text}\"*\n\n"
         "Posez vos questions de devoirs, cours ou exercices, et je vous guiderai pas à pas !"
@@ -53,27 +53,25 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(response, parse_mode='Markdown')
 
 def main():
-    # Lancement du serveur Web Flask en arrière-plan
+    # Démarrer Flask dans un thread séparé
     t = Thread(target=run_flask)
     t.daemon = True
     t.start()
 
-    # Récupération du TOKEN Telegram depuis les variables d'environnement
     TOKEN = os.environ.get("TELEGRAM_TOKEN")
     if not TOKEN:
         print("Erreur : La variable TELEGRAM_TOKEN n'est pas configurée.")
         return
 
-    # Initialisation de l'application Telegram
+    # Initialiser l'application
     application = ApplicationBuilder().token(TOKEN).build()
 
-    # Ajout des gestionnaires de commandes
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    # Lancement du bot en mode polling
-    application.run_polling()
+    # Lancement propre de la boucle polling
+    application.run_polling(drop_pending_updates=True)
 
 if __name__ == '__main__':
     main()
