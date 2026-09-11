@@ -12,19 +12,19 @@ from telegram.ext import (
     filters,
     ContextTypes
 )
-from google import genai
+import google.generativeai as genai
 from PIL import Image
 
-# --- Configuration des Logs ---
+# Configuration des logs
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# --- Initialisation de l'IA Google Gemini ---
+# Initialisation de Gemini
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-client = None
+model = None
 
 SYSTEM_INSTRUCTION = (
     "Tu es un Assistant Scolaire virtuel ultra-compétent, pédagogique, bienveillant et structuré. "
@@ -35,12 +35,16 @@ SYSTEM_INSTRUCTION = (
 
 if GEMINI_API_KEY:
     try:
-        client = genai.Client(api_key=GEMINI_API_KEY)
-        logger.info("Client Gemini AI (v2026) configuré avec succès !")
+        genai.configure(api_key=GEMINI_API_KEY.strip())
+        model = genai.GenerativeModel(
+            model_name="gemini-1.5-flash",
+            system_instruction=SYSTEM_INSTRUCTION
+        )
+        logger.info("IA Gemini connectée avec succès !")
     except Exception as e:
-        logger.error(f"Erreur d'initialisation du client Gemini : {e}")
+        logger.error(f"Erreur d'initialisation Gemini : {e}")
 
-# --- Serveur Web Flask (Keep-Alive Render) ---
+# Serveur Web Flask (garder Render éveillé)
 app = Flask(__name__)
 
 @app.route('/')
@@ -51,14 +55,14 @@ def run_flask():
     port = int(os.environ.get("PORT", 8080))
     app.run(host='0.0.0.0', port=port)
 
-# --- Handlers Telegram ---
+# Commandes Telegram
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_name = update.effective_user.first_name
     welcome_text = (
         f"Bonjour {user_name} ! 🎓\n\n"
         "Je suis votre **Assistant Scolaire IA** intelligent.\n\n"
         "✨ **Ce que je peux faire pour vous :**\n"
-        "• 📸 **Analyser la photo de ton exercice ou cours**\n"
+        "• 📸 Analyser la photo de ton exercice ou cours\n"
         "• 📐 Résoudre et expliquer vos exercices étape par étape\n"
         "• 📖 Expliquer des cours complexes\n"
         "• 📝 Rédiger des résumés, rédactions et exposés\n\n"
@@ -75,24 +79,19 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(help_text, parse_mode='Markdown')
 
-# Traitement des messages texte
+# Réponses aux messages texte
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_text = update.message.text
     chat_id = update.effective_chat.id
 
     await context.bot.send_chat_action(chat_id=chat_id, action="typing")
 
-    if not client:
-        await update.message.reply_text("⚠️ L'IA n'est pas connectée. Vérifiez `GEMINI_API_KEY` sur Render.")
+    if not model:
+        await update.message.reply_text("⚠️ Clé GEMINI_API_KEY introuvable ou invalide sur Render.")
         return
 
     try:
-        response = await asyncio.to_thread(
-            client.models.generate_content,
-            model='gemini-2.5-flash',
-            contents=user_text,
-            config={'system_instruction': SYSTEM_INSTRUCTION}
-        )
+        response = await asyncio.to_thread(model.generate_content, user_text)
         reply_text = response.text if response.text else "Désolé, je n'ai pas pu générer de réponse."
 
         try:
@@ -102,17 +101,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     except Exception as e:
         logger.error(f"Erreur Texte : {e}")
-        await update.message.reply_text("❌ Une erreur est survenue lors de la génération. Veuillez réanalyser la requête.")
+        await update.message.reply_text("❌ Erreur lors de la réponse de l'IA. Vérifiez l'état du serveur.")
 
-# Traitement des photos reçues
+# Réponses aux photos
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    caption = update.message.caption or "Analyse cette image et résous l'exercice présent dessus étape par étape."
+    caption = update.message.caption or "Analyse cette image et résous ou résume l'exercice présent dessus étape par étape."
 
     await context.bot.send_chat_action(chat_id=chat_id, action="typing")
 
-    if not client:
-        await update.message.reply_text("⚠️ L'IA n'est pas connectée. Vérifiez `GEMINI_API_KEY` sur Render.")
+    if not model:
+        await update.message.reply_text("⚠️ Clé GEMINI_API_KEY introuvable ou invalide sur Render.")
         return
 
     try:
@@ -120,12 +119,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         photo_bytes = await photo_file.download_as_bytearray()
         image = Image.open(io.BytesIO(photo_bytes))
 
-        response = await asyncio.to_thread(
-            client.models.generate_content,
-            model='gemini-2.5-flash',
-            contents=[caption, image],
-            config={'system_instruction': SYSTEM_INSTRUCTION}
-        )
+        response = await asyncio.to_thread(model.generate_content, [caption, image])
         reply_text = response.text if response.text else "Impossible d'analyser l'image."
 
         try:
@@ -135,9 +129,9 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     except Exception as e:
         logger.error(f"Erreur Photo : {e}")
-        await update.message.reply_text("❌ Erreur lors de l'analyse de la photo. Assurez-vous que l'image est bien lisible.")
+        await update.message.reply_text("❌ Erreur lors de l'analyse de la photo. Assurez-vous que la photo est lisible.")
 
-# --- Démarrage principal ---
+# Lancement
 def main():
     flask_thread = Thread(target=run_flask, daemon=True)
     flask_thread.start()
@@ -147,14 +141,14 @@ def main():
         logger.critical("TELEGRAM_TOKEN introuvable !")
         return
 
-    application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    application = ApplicationBuilder().token(TELEGRAM_TOKEN.strip()).build()
 
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
 
-    logger.info("Lancement du bot Telegram...")
+    logger.info("Bot Telegram en cours d'exécution...")
     application.run_polling(drop_pending_updates=True)
 
 if __name__ == '__main__':
