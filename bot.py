@@ -1,4 +1,5 @@
 import os
+import io
 import logging
 import asyncio
 from flask import Flask
@@ -12,6 +13,7 @@ from telegram.ext import (
     ContextTypes
 )
 import google.generativeai as genai
+from PIL import Image
 
 # --- Configuration des Logs ---
 logging.basicConfig(
@@ -24,28 +26,30 @@ logger = logging.getLogger(__name__)
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 model = None
 
+SYSTEM_INSTRUCTION = (
+    "Tu es un Assistant Scolaire virtuel ultra-compétent, pédagogique, bienveillant et structuré. "
+    "Ton objectif est d'aider les élèves à comprendre leurs cours, résoudre leurs exercices étape par étape "
+    "sans donner directement la réponse brute sans explication. Si une image ou une photo d'exercice te est envoyée, "
+    "lis attentivement l'énoncé de l'image et résous-le de manière détaillée."
+)
+
 if GEMINI_API_KEY:
     try:
         genai.configure(api_key=GEMINI_API_KEY)
         model = genai.GenerativeModel(
             model_name="gemini-1.5-flash",
-            system_instruction=(
-                "Tu es un Assistant Scolaire virtuel ultra-compétent, pédagogique, bienveillant et structuré. "
-                "Ton objectif est d'aider les élèves (collège, lycée, université) à comprendre leurs cours, "
-                "résoudre leurs exercices étape par étape sans donner directement la réponse brute sans explication, "
-                "et résumer leurs leçons. Réponds de façon claire avec un ton encourageant."
-            )
+            system_instruction=SYSTEM_INSTRUCTION
         )
-        logger.info("IA Gemini configurée avec succès !")
+        logger.info("IA Gemini avec support Vision initialisée avec succès !")
     except Exception as e:
-        logger.error(f"Erreur lors de la configuration de Gemini : {e}")
+        logger.error(f"Erreur d'initialisation Gemini : {e}")
 
-# --- Serveur Web Flask (Keep-Alive Render) ---
+# --- Serveur Web Flask ---
 app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "🚀 Assistant Scolaire IA est en ligne 24/7 !"
+    return "🚀 Assistant Scolaire IA + Vision est en ligne !"
 
 def run_flask():
     port = int(os.environ.get("PORT", 8080))
@@ -55,73 +59,104 @@ def run_flask():
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_name = update.effective_user.first_name
     welcome_text = (
-        f"Bonjour **{user_name}** ! 🎓\n\n"
+        f"Bonjour {user_name} ! 🎓\n\n"
         "Je suis votre **Assistant Scolaire IA** intelligent.\n\n"
         "✨ **Ce que je peux faire pour vous :**\n"
-        "• 📐 Résoudre et expliquer vos exercices (Maths, PC, SVT...)\n"
-        "• 📖 Expliquer des cours complexes\n"
-        "• 📝 Rédiger des résumés, rédactions et exposés\n"
-        "• 💡 Proposer des sujets d'entraînement\n\n"
-        "Posez-moi simplement votre question ci-dessous !"
+        "• 📸 **Analyser la photo de ton exercice ou cours**\n"
+        "• 📐 Résoudre et expliquer vos exercices étape par étape\n"
+        "• 📖 Expliquer des chapitres complexes\n"
+        "• 📝 Rédiger des résumés et dissertations\n\n"
+        "Envoyez-moi un message texte ou **une photo de votre devoir** !"
     )
     await update.message.reply_text(welcome_text, parse_mode='Markdown')
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = (
         "📚 **Guide d'utilisation**\n\n"
-        "1. Ecrivez directement votre exercice ou question.\n"
-        "2. Soyez le plus clair possible dans l'énoncé.\n"
-        "3. Exemple : *'Explique-moi la réaction de photosynthèse en SVT.'*\n\n"
-        "Tapez /start pour revenir au menu principal."
+        "1. **Texte :** Posez directement votre question.\n"
+        "2. **Photo :** Prenez en photo votre feuille d'exercice et envoyez-la ici !\n\n"
+        "Tapez /start pour revenir au menu."
     )
     await update.message.reply_text(help_text, parse_mode='Markdown')
 
+# Traitement des messages texte
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_text = update.message.text
     chat_id = update.effective_chat.id
 
-    # Indiquer que le bot écrit
     await context.bot.send_chat_action(chat_id=chat_id, action="typing")
 
     if not model:
-        fallback_text = (
-            f"📚 **Question reçue :** *\"{user_text}\"*\n\n"
-            "⚠️ L'IA n'est pas encore connectée. N'oubliez pas d'ajouter la variable `GEMINI_API_KEY` dans Render !"
-        )
-        await update.message.reply_text(fallback_text, parse_mode='Markdown')
+        await update.message.reply_text("⚠️ L'IA n'est pas connectée. Vérifiez `GEMINI_API_KEY` sur Render.")
         return
 
     try:
-        # Appel asynchrone à l'IA
         response = await asyncio.to_thread(model.generate_content, user_text)
-        reply_text = response.text if response.text else "Désolé, je n'ai pas pu générer de réponse."
-        await update.message.reply_text(reply_text, parse_mode='Markdown')
+        reply_text = response.text if response.text else "Je n'ai pas pu générer de réponse."
+        
+        try:
+            await update.message.reply_text(reply_text, parse_mode='Markdown')
+        except Exception:
+            await update.message.reply_text(reply_text)
 
     except Exception as e:
-        logger.error(f"Erreur IA : {e}")
-        await update.message.reply_text("❌ Une erreur est survenue lors de la génération. Réessayez dans un instant.")
+        logger.error(f"Erreur Texte : {e}")
+        await update.message.reply_text("❌ Une erreur est survenue. Veuillez réessayer.")
+
+# Traitement des photos reçues
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    caption = update.message.caption or "Analyse cette image et résous l'exercice présent dessus étape par étape."
+
+    await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+
+    if not model:
+        await update.message.reply_text("⚠️ L'IA n'est pas connectée. Vérifiez `GEMINI_API_KEY` sur Render.")
+        return
+
+    try:
+        # Récupération de la photo en meilleure résolution
+        photo_file = await update.message.photo[-1].get_file()
+        photo_bytes = await photo_file.download_as_bytearray()
+
+        # Conversion en image PIL
+        image = Image.open(io.BytesIO(photo_bytes))
+
+        # Envoi de la photo + consigne à Gemini Vision
+        response = await asyncio.to_thread(model.generate_content, [caption, image])
+        reply_text = response.text if response.text else "Impossible d'analyser l'image."
+
+        try:
+            await update.message.reply_text(reply_text, parse_mode='Markdown')
+        except Exception:
+            await update.message.reply_text(reply_text)
+
+    except Exception as e:
+        logger.error(f"Erreur Photo : {e}")
+        await update.message.reply_text("❌ Erreur lors de l'analyse de l'image. Assurez-vous que la photo est bien lisible.")
 
 # --- Démarrage principal ---
 def main():
-    # Lancement du serveur Web dans un thread séparé
     flask_thread = Thread(target=run_flask, daemon=True)
     flask_thread.start()
 
-    # Clé API Telegram
     TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
     if not TELEGRAM_TOKEN:
         logger.critical("TELEGRAM_TOKEN introuvable !")
         return
 
-    # Application Telegram
     application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
+    
+    # Gestionnaire du texte
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    # Gestionnaire des photos
+    application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
 
     logger.info("Lancement du bot Telegram...")
     application.run_polling(drop_pending_updates=True)
 
 if __name__ == '__main__':
-    main()
+    main() 
